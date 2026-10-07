@@ -1,4 +1,3 @@
-# network-security-lab
 # 🛡️ Home Network Security Lab
 
 Mini lab de sécurité réseau simulant une infrastructure d'entreprise
@@ -14,17 +13,19 @@ puis valider le tout par des tests offensifs et défensifs.
 
 | Outil | Rôle |
 |-------|------|
-| pfSense | Pare-feu / routeur / NAT |
+| pfSense 2.9.0 | Pare-feu / routeur / NAT |
 | Suricata | IDS (détection d'intrusion) |
 | Wireshark | Capture et analyse du trafic |
-| Ubuntu Server | Serveur en DMZ |
+| Debian 13 | Serveur en DMZ (Apache, SSH) |
 | Kali Linux | Machine d'attaque / de test (LAN) |
-| VirtualBox / VMware | Virtualisation |
+| VMware Workstation | Virtualisation |
 
 ## 🗺️ Architecture
 
 ```
             Internet
+                |
+          NAT VMware (VMnet8)
                 |
              pfSense
                 |
@@ -32,53 +33,90 @@ puis valider le tout par des tests offensifs et défensifs.
         |               |
        LAN             DMZ
         |               |
-      Kali         Ubuntu Server
+      Kali         Debian Server
 ```
 
 | Zone | Réseau | Machine | Rôle |
 |------|--------|---------|------|
-| WAN | DHCP (NAT VirtualBox) | pfSense | Accès Internet |
-| LAN | 192.168.10.0/24 | Kali Linux | Poste client / attaquant |
-| DMZ | 192.168.20.0/24 | Ubuntu Server | Serveur exposé |
+| WAN | DHCP (NAT VMware, VMnet8) | pfSense (em0) | Accès Internet |
+| LAN | 192.168.1.0/24 (segment `lan`) | Kali Linux | Poste client / attaquant |
+| DMZ | 192.168.2.0/24 (segment `dmz`) | Debian Server (192.168.2.10) | Serveur exposé |
 
-*(Adapte les plages IP à ton lab)*
+La segmentation repose sur des **LAN Segments VMware** isolés (`lan` et `dmz`) :
+chaque zone est sur un réseau virtuel distinct, et tout le trafic entre elles
+passe obligatoirement par pfSense.
 
 ![Schéma réseau](screenshots/architecture.png)
 
 ## ⚙️ Configuration
 
 ### 1. Installation de pfSense
-Création de la VM, configuration des interfaces WAN/LAN/DMZ.
-![Installation](screenshots/01-install-pfsense.png)
+VM pfSense à 3 cartes réseau (WAN en NAT, LAN et DMZ en LAN Segments),
+interfaces assignées depuis la console, puis Setup Wizard via l'interface web.
 
-### 2. Segmentation réseau (VLAN)
-Création et assignation des VLAN pour isoler les zones.
-![VLAN](screenshots/02-vlan.png)
+![Console pfSense](screenshots/01-install-pfsense.png)
+![Dashboard](screenshots/01b-pfsense-dashboard.png)
 
-### 3. Règles de pare-feu
-Politique appliquée : *deny by default*, autorisations au cas par cas.
-![Firewall](screenshots/03-firewall-rules.png)
+### 2. Interfaces et segmentation
+Interfaces WAN, LAN et DMZ (renommée depuis OPT1), serveur DHCP sur le LAN.
 
-### 4. NAT
-Configuration du NAT sortant et du port forwarding vers la DMZ.
-![NAT](screenshots/04-nat.png)
+![Interfaces](screenshots/02-interfaces.png)
+![DHCP LAN](screenshots/02c-dhcp.png)
 
-### 5. IDS Suricata
-Installation du package, activation des règles (ET Open) sur les interfaces.
-![Suricata](screenshots/05-suricata.png)
+### 3. Installation des VM
+- **Kali Linux** (LAN) : IP obtenue en DHCP.
+- **Debian Server** (DMZ) : IP fixe `192.168.2.10/24`, Apache et OpenSSH installés.
 
-### 6. Capture Wireshark
-Analyse du trafic entre les zones.
-![Wireshark](screenshots/06-wireshark.png)
+![Kali IP](screenshots/03-kali-ip.png)
+![Debian IP](screenshots/03b-debian-ip.png)
+
+### 4. Règles de pare-feu
+Politique : trafic DMZ → LAN bloqué, LAN → DMZ filtré au cas par cas
+(ping autorisé, SSH bloqué). Les règles de blocage sont journalisées.
+
+![Règles LAN](screenshots/04-firewall-lan.png)
+![Règles DMZ](screenshots/04b-firewall-dmz.png)
+
+### 5. NAT
+NAT sortant (mode automatique) pour l'accès Internet des deux zones.
+
+![NAT sortant](screenshots/05-nat-outbound.png)
+
+### 6. Tests de connectivité
+Comparaison avant/après l'application des règles.
+
+![Ping autorisé](screenshots/06-ping-ok.png)
+![SSH bloqué](screenshots/06b-ssh-blocked.png)
+![Logs pare-feu](screenshots/06c-firewall-logs.png)
+
+### 7. IDS Suricata
+Installation du package, activation des règles ET Open sur l'interface surveillée.
+
+![Installation](screenshots/07-suricata-install.png)
+![Interfaces](screenshots/07b-suricata-interfaces.png)
+![Règles](screenshots/07c-suricata-rules.png)
+
+### 8. Test de détection
+Scan Nmap depuis Kali vers le serveur DMZ, alertes générées dans Suricata.
+
+![Nmap](screenshots/08-nmap-kali.png)
+![Alertes](screenshots/08b-suricata-alerts.png)
+
+### 9. Capture Wireshark
+Analyse du scan Nmap (rafale de paquets SYN) avec le filtre
+`tcp.flags.syn==1 && tcp.flags.ack==0`.
+
+![Capture](screenshots/09-wireshark-capture.png)
+![Filtre](screenshots/09b-wireshark-filter.png)
 
 ## ✅ Tests et résultats
 
 | Test | Attendu | Résultat |
 |------|---------|----------|
-| Ping LAN → DMZ | Autorisé | ✅ |
-| SSH LAN → DMZ | Bloqué | ✅ |
-| DMZ → LAN (toute connexion) | Bloqué | ✅ |
-| Scan Nmap depuis Kali | Détecté par Suricata | ✅ |
+| Ping LAN → DMZ | Autorisé | ⬜ |
+| SSH LAN → DMZ | Bloqué | ⬜ |
+| DMZ → LAN (toute connexion) | Bloqué | ⬜ |
+| Scan Nmap depuis Kali | Détecté par Suricata | ⬜ |
 
 ## 📚 Ce que j'ai appris
 
@@ -89,6 +127,7 @@ Analyse du trafic entre les zones.
 
 ## 🚀 Pistes d'amélioration
 
+- Segmentation par VLAN (802.1Q) au lieu de réseaux séparés
 - Ajout d'un SIEM (Wazuh / ELK) pour centraliser les logs
 - Mise en place d'un VPN (OpenVPN / WireGuard)
 - Écriture de règles Suricata personnalisées
