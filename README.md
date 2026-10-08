@@ -14,7 +14,7 @@ puis valider le tout par des tests offensifs et défensifs.
 | Outil | Rôle |
 |-------|------|
 | pfSense 2.9.0 | Pare-feu / routeur / NAT |
-| Suricata | IDS (détection d'intrusion) |
+| Suricata (ET Open) | IDS (détection d'intrusion) |
 | Wireshark | Capture et analyse du trafic |
 | Debian 13 | Serveur en DMZ (Apache, SSH) |
 | Kali Linux | Machine d'attaque / de test (LAN) |
@@ -53,58 +53,89 @@ passe obligatoirement par pfSense.
 ### 1. Installation de pfSense
 VM pfSense à 3 cartes réseau (WAN en NAT, LAN et DMZ en LAN Segments),
 interfaces assignées depuis la console, puis Setup Wizard via l'interface web.
+L'option « Block RFC1918 » a été désactivée sur le WAN, car celui-ci se trouve
+lui-même sur un réseau privé (NAT VMware).
 
 ![Console pfSense](screenshots/01-install-pfsense.png)
 ![Dashboard](screenshots/01b-pfsense-dashboard.png)
 
 ### 2. Interfaces et segmentation
-Interfaces WAN, LAN et DMZ (renommée depuis OPT1), serveur DHCP sur le LAN.
+Interfaces WAN, LAN et DMZ (renommée depuis OPT1), serveur DHCP sur le LAN
+(plage `192.168.1.100` – `192.168.1.200`). Pas de DHCP sur la DMZ : le serveur
+utilise une IP fixe.
 
 ![Interfaces](screenshots/02-interfaces.png)
 ![DHCP LAN](screenshots/02c-dhcp.png)
 
 ### 3. Installation des VM
-- **Kali Linux** (LAN) : IP obtenue en DHCP.
-- **Debian Server** (DMZ) : IP fixe `192.168.2.10/24`, Apache et OpenSSH installés.
+- **Kali Linux** (LAN) : IP obtenue en DHCP (`192.168.1.101`).
+- **Debian Server** (DMZ) : IP fixe `192.168.2.10/24`, passerelle `192.168.2.1`,
+  Apache et OpenSSH installés.
 
 ![Kali IP](screenshots/03-kali-ip.png)
 ![Debian IP](screenshots/03b-debian-ip.png)
 
 ### 4. Règles de pare-feu
-Politique : trafic DMZ → LAN bloqué, LAN → DMZ filtré au cas par cas
-(ping autorisé, SSH bloqué). Les règles de blocage sont journalisées.
+
+**Test avant règles** : depuis Kali, le ping, le HTTP et le SSH vers le serveur
+DMZ passent (le LAN dispose d'une règle « allow all » par défaut).
+
+![Avant règles](screenshots/04-avant-regles.png)
+
+**Règles appliquées** (journalisées pour les blocages) :
+
+| Interface | Ordre | Action | Protocole | Source | Destination |
+|-----------|-------|--------|-----------|--------|-------------|
+| LAN | 1 | Block | TCP/22 (SSH) | LAN subnets | DMZ subnets |
+| LAN | 2 | Pass | ICMP | LAN subnets | DMZ subnets |
+| LAN | 3 | Pass | Any | LAN subnets | Any (règle par défaut) |
+| DMZ | 1 | Block | Any | DMZ subnets | LAN subnets |
+| DMZ | 2 | Pass | Any | DMZ subnets | Any (accès Internet) |
+
+L'ordre des règles est déterminant : pfSense applique la première règle qui
+correspond, de haut en bas.
 
 ![Règles LAN](screenshots/04-firewall-lan.png)
 ![Règles DMZ](screenshots/04b-firewall-dmz.png)
 
 ### 5. NAT
-NAT sortant (mode automatique) pour l'accès Internet des deux zones.
+NAT sortant en mode automatique : le LAN et la DMZ sortent sur Internet via
+l'IP du WAN. Un port forward publie le serveur web de la DMZ (WAN:80 →
+`192.168.2.10:80`).
 
 ![NAT sortant](screenshots/05-nat-outbound.png)
+![Port forward](screenshots/05b-nat-portforward.png)
 
 ### 6. Tests de connectivité
-Comparaison avant/après l'application des règles.
+Après application des règles, depuis Kali : le ping et le HTTP passent, le SSH
+expire (timeout). Le blocage est donc ciblé et non une panne réseau. Les logs
+pfSense montrent les paquets SYN bloqués (`192.168.1.101` → `192.168.2.10:22`).
+Côté DMZ, les pings vers le LAN sont bloqués par la règle `block dmz to lan`.
 
-![Ping autorisé](screenshots/06-ping-ok.png)
-![SSH bloqué](screenshots/06b-ssh-blocked.png)
-![Logs pare-feu](screenshots/06c-firewall-logs.png)
+![Ping et HTTP autorisés, SSH bloqué](screenshots/06b-ssh-blocked.png)
+![Logs pare-feu LAN](screenshots/06c-firewall-logs.png)
+![Logs pare-feu DMZ](screenshots/06d-firewall-logs-dmz.png)
 
 ### 7. IDS Suricata
-Installation du package, activation des règles ET Open sur l'interface surveillée.
+Installation du package, jeu de règles **ET Open**, catégorie
+`emerging-scan` activée. Suricata fonctionne en mode alerte uniquement
+(pas de blocage), sur l'interface **LAN**, par laquelle entre le trafic de Kali.
+L'offloading matériel (checksum, TSO, LRO) a été désactivé, comme l'exige Suricata.
 
 ![Installation](screenshots/07-suricata-install.png)
 ![Interfaces](screenshots/07b-suricata-interfaces.png)
 ![Règles](screenshots/07c-suricata-rules.png)
 
 ### 8. Test de détection
-Scan Nmap depuis Kali vers le serveur DMZ, alertes générées dans Suricata.
+Scan Nmap depuis Kali vers le serveur DMZ (`nmap -sS -p 1-1000 192.168.2.10`),
+alertes générées dans Suricata.
 
 ![Nmap](screenshots/08-nmap-kali.png)
 ![Alertes](screenshots/08b-suricata-alerts.png)
 
 ### 9. Capture Wireshark
-Analyse du scan Nmap (rafale de paquets SYN) avec le filtre
-`tcp.flags.syn==1 && tcp.flags.ack==0`.
+Capture du scan Nmap sur Kali : rafale de paquets SYN vers des ports différents.
+Filtre utilisé : `tcp.flags.syn==1 && tcp.flags.ack==0`.
 
 ![Capture](screenshots/09-wireshark-capture.png)
 ![Filtre](screenshots/09b-wireshark-filter.png)
@@ -113,24 +144,43 @@ Analyse du scan Nmap (rafale de paquets SYN) avec le filtre
 
 | Test | Attendu | Résultat |
 |------|---------|----------|
-| Ping LAN → DMZ | Autorisé | ⬜ |
-| SSH LAN → DMZ | Bloqué | ⬜ |
-| DMZ → LAN (toute connexion) | Bloqué | ⬜ |
-| Scan Nmap depuis Kali | Détecté par Suricata | ⬜ |
+| Ping LAN → DMZ | Autorisé | ✅ |
+| HTTP LAN → DMZ | Autorisé | ✅ |
+| SSH LAN → DMZ | Bloqué | ✅ |
+| DMZ → LAN (toute connexion) | Bloqué | ✅ |
+| Scan Nmap depuis Kali | Détecté par Suricata | ✅ |
+
+## 🧩 Difficultés rencontrées
+
+- **Pas de ping vers 8.8.8.8** : le Wi-Fi de l'hôte filtrait l'ICMP. L'accès
+  Internet a été validé avec `curl` (réponse HTTP 200), pas avec le ping.
+- **Sous-réseau VMnet8 modifié** : l'IP du WAN est passée de `192.168.124.x` à
+  `192.168.28.x`, ce qui a rendu les premiers tests de passerelle invalides.
+- **DMZ → LAN encore autorisé** : la règle de blocage avait été créée sur le
+  mauvais onglet. Chaque interface a sa propre liste de règles.
+- **Suricata sans alerte sur la DMZ** : le trafic de Kali est inspecté à son
+  entrée dans pfSense. L'instance a donc été placée sur le LAN.
+- **Avertissement d'offloading** : désactivation du checksum, du TSO et du LRO
+  dans *System → Advanced → Networking*.
 
 ## 📚 Ce que j'ai appris
 
 - Principes de segmentation réseau et de défense en profondeur
-- Écriture de règles firewall selon le moindre privilège
-- Fonctionnement d'un IDS et analyse des alertes
-- Lecture de paquets avec Wireshark
+- L'ordre des règles pfSense compte : la première qui correspond s'applique
+- Chaque interface pfSense a sa propre politique de filtrage
+- Un blocage ciblé se prouve en montrant que les autres flux passent toujours
+- Suricata voit le trafic sur l'interface où il entre : le choix de
+  l'interface surveillée change ce qui est détecté
+- Lecture de paquets avec Wireshark (SYN en rafale, réponses RST/SYN-ACK)
 
 ## 🚀 Pistes d'amélioration
 
 - Segmentation par VLAN (802.1Q) au lieu de réseaux séparés
+- Passage de la politique LAN en « deny by default »
 - Ajout d'un SIEM (Wazuh / ELK) pour centraliser les logs
 - Mise en place d'un VPN (OpenVPN / WireGuard)
 - Écriture de règles Suricata personnalisées
+- Suricata en mode IPS (blocage) plutôt qu'alerte seule
 - Ajout d'un serveur web vulnérable en DMZ (DVWA)
 
 ## 📁 Structure du dépôt
